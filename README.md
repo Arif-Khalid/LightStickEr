@@ -63,3 +63,59 @@ sticker, since Telegram doesn't expose that.
 - Send the bot any sticker, then reply with the pack title when it asks.
 - `/pack <title>` lists links to an existing pack's set(s).
 - `/start` shows a short intro.
+
+## Deploying to Cloud Run
+
+Locally the bot polls Telegram for updates (`RUN_MODE=polling`). Cloud Run
+bills per request and can scale to zero, which doesn't mix well with a
+process that holds an outbound long-poll connection open forever — so in
+production the bot instead runs a small HTTP server and Telegram pushes
+updates to it (`RUN_MODE=webhook`, handled by `webhook_server.py`).
+
+The container never calls `setWebhook` itself — it doesn't know its own
+public URL until Cloud Run assigns one, and guessing wrong would crash it
+before it could even start listening. So registering the webhook with
+Telegram is a separate, explicit step you do once you know the URL.
+
+1. Generate a webhook secret (used to reject requests that aren't really
+   from Telegram):
+
+   ```bash
+   python -c "import secrets; print(secrets.token_urlsafe(32))"
+   ```
+
+2. Deploy the container (Cloud Build builds it from source, no local Docker
+   needed). `BOT_TOKEN` and `WEBHOOK_SECRET` hold real secrets, so pass them
+   via Secret Manager rather than `--set-env-vars`:
+
+   ```bash
+   gcloud secrets create bot-token --data-file=- <<< "your-bot-token"
+   gcloud secrets create webhook-secret --data-file=- <<< "the-secret-from-step-1"
+
+   gcloud run deploy lightsticker \
+     --source . \
+     --region us-central1 \
+     --allow-unauthenticated \
+     --set-env-vars RUN_MODE=webhook,OWNER_USER_ID=123456789 \
+     --set-secrets BOT_TOKEN=bot-token:latest,WEBHOOK_SECRET=webhook-secret:latest
+   ```
+
+   `--allow-unauthenticated` is required so Telegram's servers can reach the
+   webhook endpoint. Note the URL the command prints when it finishes
+   (`https://lightsticker-xxxxx.a.run.app`).
+
+3. Register that URL with Telegram (path is the bot token, matching what
+   `webhook_server.py` listens on):
+
+   ```bash
+   curl "https://api.telegram.org/bot<your-bot-token>/setWebhook" \
+     -d "url=https://lightsticker-xxxxx.a.run.app/<your-bot-token>" \
+     -d "secret_token=the-secret-from-step-1"
+   ```
+
+Send the bot a sticker to confirm it responds. If you ever redeploy to a
+different URL (new service name, region, or custom domain), just repeat
+step 3 with the new URL — `GET https://api.telegram.org/bot<token>/getWebhookInfo`
+shows what Telegram currently has registered, useful for checking it's live
+and see the `pending_update_count`/`last_error_message` fields if something's
+wrong.

@@ -11,6 +11,7 @@ from telegram.ext import (
     filters,
 )
 
+import webhook_server
 from config import load_config
 from stickers import MAX_TITLE_LENGTH, add_sticker_for_user, list_current_sets, slugify_title
 
@@ -161,7 +162,15 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_title_reply))
     application.add_handler(CallbackQueryHandler(handle_confirm_new, pattern="^confirm_new:"))
 
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    if config.run_mode == "webhook":
+        webhook_server.run(
+            application,
+            port=config.port,
+            webhook_secret=config.webhook_secret,
+            url_path=config.bot_token,
+        )
+    else:
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
