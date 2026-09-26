@@ -22,13 +22,15 @@ logger = logging.getLogger(__name__)
 
 PENDING_STICKER_KEY = "pending_sticker"
 PENDING_TITLE_KEY = "pending_title"
+PROMPT_MESSAGE_ID_KEY = "prompt_message_id"
 
 CONFIRM_YES = "confirm_new:yes"
 CONFIRM_NO = "confirm_new:no"
+CANCEL_ADD = "cancel_add"
 
 START_TEXT = (
     "Send me any sticker and I'll ask you which pack to add it to (creating it if it's new).\n\n"
-    "Use /pack <title> to get links to an existing pack."
+    "Use /pack <title> to get links to an existing pack, or /cancel to back out of adding a sticker."
 )
 
 
@@ -56,12 +58,52 @@ async def pack(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("\n".join(lines))
 
 
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _remove_prompt_keyboard(context, update.effective_chat.id)
+    _clear_pending(context)
+    await update.message.reply_text("Cancelled — sticker not added.")
+
+
+async def handle_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    _clear_pending(context)
+    await query.edit_message_text("Cancelled — sticker not added.")
+
+
+def _clear_pending(context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data[PENDING_STICKER_KEY] = None
+    context.user_data[PENDING_TITLE_KEY] = None
+    context.user_data[PROMPT_MESSAGE_ID_KEY] = None
+
+
+async def _remove_prompt_keyboard(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    """Strips the Cancel button off the earlier title-prompt message, if any.
+
+    Called once the user has moved past it by typing instead of tapping it,
+    so it doesn't linger as a stale, still-clickable button.
+    """
+    message_id = context.user_data.get(PROMPT_MESSAGE_ID_KEY)
+    if message_id is None:
+        return
+    context.user_data[PROMPT_MESSAGE_ID_KEY] = None
+    try:
+        await context.bot.edit_message_reply_markup(
+            chat_id=chat_id, message_id=message_id, reply_markup=None
+        )
+    except TelegramError:
+        pass  # message may already be edited/gone - nothing to clean up
+
+
 async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data[PENDING_STICKER_KEY] = update.message.sticker
     context.user_data[PENDING_TITLE_KEY] = None
-    await update.message.reply_text(
-        "What's the title of the pack to add this to? (I'll create it if it doesn't exist yet.)"
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data=CANCEL_ADD)]])
+    prompt_message = await update.message.reply_text(
+        "What's the title of the pack to add this to? (I'll create it if it doesn't exist yet.)",
+        reply_markup=keyboard,
     )
+    context.user_data[PROMPT_MESSAGE_ID_KEY] = prompt_message.message_id
 
 
 async def handle_title_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -75,6 +117,8 @@ async def handle_title_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     title = title[:MAX_TITLE_LENGTH]
 
+    await _remove_prompt_keyboard(context, update.effective_chat.id)
+
     bot_username = context.bot_data["bot_username"]
     existing = await list_current_sets(context.bot, slugify_title(title), bot_username)
 
@@ -87,7 +131,8 @@ async def handle_title_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 [
                     InlineKeyboardButton("Yes, create it", callback_data=CONFIRM_YES),
                     InlineKeyboardButton("No, let me retype", callback_data=CONFIRM_NO),
-                ]
+                ],
+                [InlineKeyboardButton("Cancel", callback_data=CANCEL_ADD)],
             ]
         )
         await update.message.reply_text(
@@ -158,9 +203,11 @@ def main() -> None:
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("pack", pack))
+    application.add_handler(CommandHandler("cancel", cancel_command))
     application.add_handler(MessageHandler(filters.Sticker.ALL, handle_sticker))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_title_reply))
     application.add_handler(CallbackQueryHandler(handle_confirm_new, pattern="^confirm_new:"))
+    application.add_handler(CallbackQueryHandler(handle_cancel_callback, pattern=f"^{CANCEL_ADD}$"))
 
     if config.run_mode == "webhook":
         webhook_server.run(

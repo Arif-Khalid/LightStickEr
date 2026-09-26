@@ -61,6 +61,8 @@ sticker, since Telegram doesn't expose that.
 ## Usage
 
 - Send the bot any sticker, then reply with the pack title when it asks.
+- A "Cancel" button is attached to the title prompt and the new-pack
+  confirmation prompt; `/cancel` works too if you'd rather type it.
 - `/pack <title>` lists links to an existing pack's set(s).
 - `/start` shows a short intro.
 
