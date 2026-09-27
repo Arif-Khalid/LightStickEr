@@ -1,7 +1,7 @@
 import logging
 import random
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Sticker, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, MessageOriginUser, Sticker, Update
 from telegram.error import TelegramError
 from telegram.ext import (
     Application,
@@ -12,6 +12,7 @@ from telegram.ext import (
     filters,
 )
 
+import packs_db
 import webhook_server
 from config import load_config
 from stickers import MAX_TITLE_LENGTH, add_sticker_for_user, list_current_sets, slugify_title
@@ -26,16 +27,27 @@ PENDING_TITLE_KEY = "pending_title"
 PROMPT_MESSAGE_ID_KEY = "prompt_message_id"
 AWAITING_DELETE_KEY = "awaiting_delete"
 PENDING_DELETE_KEY = "pending_delete"
+ADMIN_ACTION_KEY = "admin_action"  # "grant" or "revoke" while awaiting a target user
+PENDING_ADMIN_TARGET_KEY = "pending_admin_target"  # {"user_id", "name"} awaiting a pack choice
 
 CONFIRM_YES = "confirm_new:yes"
 CONFIRM_NO = "confirm_new:no"
 CONFIRM_DELETE = "confirm_delete"
-CANCEL_ADD = "cancel_add"  # cancels whatever flow (add or delete) is currently pending
+CANCEL_ADD = "cancel_add"  # cancels whatever flow is currently pending
+PACK_ADD_PREFIX = "pack_add:"
+GRANT_PACK_PREFIX = "grant_pack:"
+REVOKE_PACK_PREFIX = "revoke_pack:"
 
 START_TEXT = (
     "Send me any sticker and I'll ask you which pack to add it to (creating it if it's new).\n\n"
-    "Use /pack <title> to get links to an existing pack, /delete to remove a sticker from its "
-    "pack, or /cancel to back out of either."
+    "Commands:\n"
+    "/pack <title> - get links to an existing pack\n"
+    "/mypacks - see packs you admin\n"
+    "/delete - remove a sticker from its pack (requires admin rights on that pack)\n"
+    "/grantadmin - let someone else add/delete for a pack (requires admin rights on that pack)\n"
+    "/revokeadmin - take that back (requires admin rights on that pack)\n"
+    "/whoami - get your numeric Telegram ID\n"
+    "/cancel - back out of whatever's in progress"
 )
 
 CACHE_NOTE = (
@@ -48,26 +60,24 @@ GIRLFRIEND_USER_ID = 372918555
 GIRLFRIEND_BONUS_MESSAGES = [
     "P.S. Arif likes you <3",
     "P.S. Your boyfriend thinks you are the best",
-    "P.S. Your outfits are the cutest, your boyfriend told me the other day",
+    "P.S. Your outfits are the cutest, according to your boyfriend",
     "P.S. Arif is thinking about his girlfriend right now",
-    "P.S. Your boyfriend thinks you are so adorable",
+    "P.S. Your boyfriend thinks you make sticker-hunting look adorable",
     "P.S. Arif would pick you as his girlfriend all over again, 10/10",
     "P.S. Your boyfriend is smiling just thinking of you",
-    "P.S. Go crush that gym session, your boyfriend wishes he was as committed",
-    "P.S. Arif thinks his girlfriend's training intensity and commitment is inspiring",
-    "P.S. Your boyfriend thinks you're a lifesaver, in and out of the pool. You saved his life by coming into it.",
-    "P.S. You make Arif's day better by just being around :)",
-    "P.S. Arif wants you to know and I quote: \"Damn you are gorgeous\"",
+    "P.S. Go crush that gym session, dear - your boyfriend Arif is cheering you on",
+    "P.S. Arif thinks his girlfriend's training arc is inspiring",
+    "P.S. Your boyfriend thinks you're a lifesaver, in and out of the pool",
     "P.S. Officially certified by Arif: best lifeguard, best girlfriend",
-    "P.S. Arif and his girlfriend really do have great taste, how else could they have found each other",
-    "P.S. Trying new and many food varieties is easy when your boyfriend can finish all the leftovers",
-    "P.S. Arif will trade you all pork for all tomatoes"
+    "P.S. Arif thinks his girlfriend saving lives for fun is kind of amazing",
+    "P.S. Arif and his girlfriend really do have great taste - in food, at least",
+    "P.S. Not picky, just efficient eaters, you and your boyfriend",
     "P.S. Save some chocolate for your boyfriend",
-    "P.S. Sweet tooth confirmed, telling Arif to send chocolates",
-    "P.S. Rest that knee please, your boyfriend insists",
+    "P.S. Sweet tooth confirmed - Arif says send chocolate to his girlfriend",
+    "P.S. Rest that knee, dear - your boyfriend insists",
     "P.S. Arif's plantar fasciitis says hi to his girlfriend's knee, fellow injured athlete",
     "P.S. Two injured runners, one great excuse for boyfriend-girlfriend rest days",
-    "P.S. Your voice bubbles are the highlight of your boyfriend's day",
+    "P.S. Your voice bubbles are the highlight of your boyfriend Arif's day",
 ]
 
 
@@ -79,6 +89,12 @@ def _bonus_message(user_id: int) -> str:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(START_TEXT)
+
+
+async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    name = f"@{user.username}" if user.username else user.first_name
+    await update.message.reply_text(f"Your Telegram ID is {user.id} ({name}).")
 
 
 async def pack(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -101,6 +117,17 @@ async def pack(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("\n".join(lines))
 
 
+async def mypacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    config = context.bot_data["config"]
+    user_id = update.effective_user.id
+    packs = await packs_db.list_all() if user_id == config.owner_user_id else await packs_db.list_for_admin(user_id)
+    if not packs:
+        await update.message.reply_text("You're not an admin of any packs yet.")
+        return
+    lines = ["Packs you admin:"] + [f"- {title}" for _, title in sorted(packs, key=lambda p: p[1].lower())]
+    await update.message.reply_text("\n".join(lines))
+
+
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _remove_prompt_keyboard(context, update.effective_chat.id)
     _clear_pending(context)
@@ -120,13 +147,16 @@ def _clear_pending(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data[PROMPT_MESSAGE_ID_KEY] = None
     context.user_data[AWAITING_DELETE_KEY] = False
     context.user_data[PENDING_DELETE_KEY] = None
+    context.user_data[ADMIN_ACTION_KEY] = None
+    context.user_data[PENDING_ADMIN_TARGET_KEY] = None
 
 
 async def _remove_prompt_keyboard(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
-    """Strips the Cancel button off the earlier title-prompt message, if any.
+    """Strips the buttons off the earlier prompt message, if any.
 
-    Called once the user has moved past it by typing instead of tapping it,
-    so it doesn't linger as a stale, still-clickable button.
+    Called once the user has moved past it (by typing, or by the flow
+    otherwise progressing) so it doesn't linger as a stale, still-clickable
+    keyboard.
     """
     message_id = context.user_data.get(PROMPT_MESSAGE_ID_KEY)
     if message_id is None:
@@ -151,19 +181,112 @@ async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     context.user_data[PROMPT_MESSAGE_ID_KEY] = prompt_message.message_id
 
 
-async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if context.user_data.get(AWAITING_DELETE_KEY):
-        await _handle_delete_target(update, context)
-        return
+async def grant_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _start_admin_action(update, context, mode="grant")
 
-    context.user_data[PENDING_STICKER_KEY] = update.message.sticker
-    context.user_data[PENDING_TITLE_KEY] = None
+
+async def revoke_admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _start_admin_action(update, context, mode="revoke")
+
+
+async def _start_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE, mode: str) -> None:
+    config = context.bot_data["config"]
+    user_id = update.effective_user.id
+    if user_id != config.owner_user_id:
+        packs = await packs_db.list_for_admin(user_id)
+        if not packs:
+            await update.message.reply_text("You're not an admin of any packs yet.")
+            return
+
+    _clear_pending(context)
+    context.user_data[ADMIN_ACTION_KEY] = mode
+    match mode:
+        case "grant":
+            verb = "add"
+        case "revoke":
+            verb = "remove"
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data=CANCEL_ADD)]])
     prompt_message = await update.message.reply_text(
-        "What's the title of the pack to add this to? (I'll create it if it doesn't exist yet.)",
+        f"Forward me a message from the person you want to {verb} as an admin, or send their "
+        "numeric user ID directly (they can get it by sending /whoami to me).",
         reply_markup=keyboard,
     )
     context.user_data[PROMPT_MESSAGE_ID_KEY] = prompt_message.message_id
+
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message
+    if message is None:
+        return
+
+    if context.user_data.get(ADMIN_ACTION_KEY):
+        await _handle_admin_target(update, context)
+        return
+
+    if context.user_data.get(AWAITING_DELETE_KEY):
+        if message.sticker:
+            await _handle_delete_target(update, context)
+        else:
+            await message.reply_text("Send me a sticker to delete, or /cancel.")
+        return
+
+    if message.sticker:
+        await _handle_new_sticker(update, context)
+        return
+
+    if message.text and context.user_data.get(PENDING_STICKER_KEY):
+        await handle_title_reply(update, context)
+        return
+
+    # Nothing pending and nothing recognized - remind them what the bot does.
+    await message.reply_text(START_TEXT)
+
+
+async def _handle_new_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data[PENDING_STICKER_KEY] = update.message.sticker
+    context.user_data[PENDING_TITLE_KEY] = None
+
+    config = context.bot_data["config"]
+    user_id = update.effective_user.id
+    packs = await packs_db.list_all() if user_id == config.owner_user_id else await packs_db.list_for_admin(user_id)
+
+    buttons = [
+        [InlineKeyboardButton(title, callback_data=f"{PACK_ADD_PREFIX}{slug}")]
+        for slug, title in sorted(packs, key=lambda p: p[1].lower())
+    ]
+    buttons.append([InlineKeyboardButton("Cancel", callback_data=CANCEL_ADD)])
+
+    prompt_text = (
+        "Pick a pack to add this to, or type a new title:"
+        if packs
+        else "What's the title of the pack to add this to? (I'll create it if it doesn't exist yet.)"
+    )
+    prompt_message = await update.message.reply_text(
+        prompt_text, reply_markup=InlineKeyboardMarkup(buttons)
+    )
+    context.user_data[PROMPT_MESSAGE_ID_KEY] = prompt_message.message_id
+
+
+async def handle_pack_add_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+
+    sticker: Sticker | None = context.user_data.get(PENDING_STICKER_KEY)
+    if sticker is None:
+        await query.edit_message_text("That request expired — send the sticker again.")
+        return
+
+    slug = query.data[len(PACK_ADD_PREFIX):]
+    title = await packs_db.get_title(slug)
+    if title is None:
+        await query.edit_message_text("That pack no longer exists — send the sticker again.")
+        return
+
+    await query.edit_message_reply_markup(reply_markup=None)
+    context.user_data[PENDING_STICKER_KEY] = None
+    context.user_data[PROMPT_MESSAGE_ID_KEY] = None
+
+    await _add_and_reply(context, query.message.chat_id, query.from_user.id, sticker, title)
 
 
 async def _handle_delete_target(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -185,9 +308,19 @@ async def _handle_delete_target(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text(not_ours_text)
         return
 
+    config = context.bot_data["config"]
+    slug = slugify_title(sticker_set.title)
+    user_id = update.effective_user.id
+    if not await packs_db.is_admin(slug, user_id, config.owner_user_id):
+        await update.message.reply_text(
+            f'You don\'t have admin rights on "{sticker_set.title}", so I can\'t delete from it.'
+        )
+        return
+
     context.user_data[PENDING_DELETE_KEY] = {
         "file_id": sticker.file_id,
         "title": sticker_set.title,
+        "slug": slug,
     }
     keyboard = InlineKeyboardMarkup(
         [
@@ -215,12 +348,19 @@ async def handle_confirm_delete(update: Update, context: ContextTypes.DEFAULT_TY
     await query.edit_message_reply_markup(reply_markup=None)
     context.user_data[PENDING_DELETE_KEY] = None
 
+    config = context.bot_data["config"]
+    if not await packs_db.is_admin(pending["slug"], query.from_user.id, config.owner_user_id):
+        await context.bot.send_message(
+            query.message.chat_id,
+            f'You don\'t have admin rights on "{pending["title"]}" anymore, so I can\'t delete from it.',
+        )
+        return
+
     try:
         await context.bot.delete_sticker_from_set(sticker=pending["file_id"])
         await context.bot.send_message(
             query.message.chat_id,
-            f'Deleted from "{pending["title"]}".'
-            f"{CACHE_NOTE}{_bonus_message(query.from_user.id)}",
+            f'Deleted from "{pending["title"]}".{CACHE_NOTE}{_bonus_message(query.from_user.id)}',
         )
     except TelegramError as exc:
         logger.exception("Failed to delete sticker")
@@ -293,12 +433,20 @@ async def _add_and_reply(
 ) -> None:
     config = context.bot_data["config"]
     bot_username = context.bot_data["bot_username"]
+    slug = slugify_title(title)
+
+    allowed = await packs_db.claim_or_check(slug, title, user_id, config.owner_user_id)
+    if not allowed:
+        await context.bot.send_message(
+            chat_id, f'You don\'t have admin rights on "{title}", so I can\'t add to it.'
+        )
+        return
 
     try:
         set_name = await add_sticker_for_user(
             bot=context.bot,
             owner_user_id=config.owner_user_id,
-            base_name=slugify_title(title),
+            base_name=slug,
             set_title=title,
             bot_username=bot_username,
             sticker=sticker,
@@ -315,6 +463,106 @@ async def _add_and_reply(
         await context.bot.send_message(chat_id, f"Sorry, couldn't add that sticker: {exc}")
 
 
+async def _handle_admin_target(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.message
+    mode = context.user_data.get(ADMIN_ACTION_KEY)
+
+    target_id: int | None = None
+    target_name: str | None = None
+
+    origin = message.forward_origin
+    if isinstance(origin, MessageOriginUser):
+        target_id = origin.sender_user.id
+        target_name = (
+            f"@{origin.sender_user.username}" if origin.sender_user.username else origin.sender_user.first_name
+        )
+    elif message.text and message.text.strip().lstrip("-").isdigit():
+        target_id = int(message.text.strip())
+        target_name = f"user {target_id}"
+
+    if target_id is None:
+        await message.reply_text(
+            "I couldn't identify who that is. Forward a message from them, or send their "
+            "numeric user ID directly (they can get it by sending /whoami to me)."
+        )
+        return
+
+    await _remove_prompt_keyboard(context, update.effective_chat.id)
+    context.user_data[ADMIN_ACTION_KEY] = None
+
+    config = context.bot_data["config"]
+    acting_user_id = update.effective_user.id
+
+    if mode == "grant":
+        packs = (
+            await packs_db.list_all()
+            if acting_user_id == config.owner_user_id
+            else await packs_db.list_for_admin(acting_user_id)
+        )
+        prefix = GRANT_PACK_PREFIX
+        empty_text = "You don't have admin rights on any packs to grant."
+        prompt_verb = "added to"
+    else:
+        target_packs = await packs_db.list_for_admin(target_id)
+        if acting_user_id == config.owner_user_id:
+            packs = target_packs
+        else:
+            acting_slugs = {slug for slug, _ in await packs_db.list_for_admin(acting_user_id)}
+            packs = [(slug, title) for slug, title in target_packs if slug in acting_slugs]
+        prefix = REVOKE_PACK_PREFIX
+        empty_text = f"{target_name} isn't an admin of any packs you control."
+        prompt_verb = "removed from"
+
+    if not packs:
+        context.user_data[PENDING_ADMIN_TARGET_KEY] = None
+        await message.reply_text(empty_text)
+        return
+
+    context.user_data[PENDING_ADMIN_TARGET_KEY] = {"user_id": target_id, "name": target_name}
+    buttons = [
+        [InlineKeyboardButton(title, callback_data=f"{prefix}{slug}")]
+        for slug, title in sorted(packs, key=lambda p: p[1].lower())
+    ]
+    buttons.append([InlineKeyboardButton("Cancel", callback_data=CANCEL_ADD)])
+    prompt_message = await message.reply_text(
+        f"Which pack should {target_name} be {prompt_verb} as an admin?",
+        reply_markup=InlineKeyboardMarkup(buttons),
+    )
+    context.user_data[PROMPT_MESSAGE_ID_KEY] = prompt_message.message_id
+
+
+async def handle_admin_pack_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+
+    target = context.user_data.get(PENDING_ADMIN_TARGET_KEY)
+    if target is None:
+        await query.edit_message_text("That request expired — start over with /grantadmin or /revokeadmin.")
+        return
+
+    is_grant = query.data.startswith(GRANT_PACK_PREFIX)
+    slug = query.data[len(GRANT_PACK_PREFIX if is_grant else REVOKE_PACK_PREFIX):]
+    title = await packs_db.get_title(slug)
+
+    await query.edit_message_reply_markup(reply_markup=None)
+    context.user_data[PENDING_ADMIN_TARGET_KEY] = None
+
+    if title is None:
+        await context.bot.send_message(query.message.chat_id, "That pack no longer exists.")
+        return
+
+    if is_grant:
+        await packs_db.grant(slug, target["user_id"])
+        await context.bot.send_message(
+            query.message.chat_id, f'Added {target["name"]} as an admin of "{title}".'
+        )
+    else:
+        await packs_db.revoke(slug, target["user_id"])
+        await context.bot.send_message(
+            query.message.chat_id, f'Removed {target["name"]} as an admin of "{title}".'
+        )
+
+
 async def on_startup(application: Application) -> None:
     me = await application.bot.get_me()
     application.bot_data["bot_username"] = me.username
@@ -327,13 +575,20 @@ def main() -> None:
     application.bot_data["config"] = config
 
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("whoami", whoami))
     application.add_handler(CommandHandler("pack", pack))
+    application.add_handler(CommandHandler("mypacks", mypacks))
     application.add_handler(CommandHandler("delete", delete_command))
+    application.add_handler(CommandHandler("grantadmin", grant_admin_command))
+    application.add_handler(CommandHandler("revokeadmin", revoke_admin_command))
     application.add_handler(CommandHandler("cancel", cancel_command))
-    application.add_handler(MessageHandler(filters.Sticker.ALL, handle_sticker))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_title_reply))
+    application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
     application.add_handler(CallbackQueryHandler(handle_confirm_new, pattern="^confirm_new:"))
     application.add_handler(CallbackQueryHandler(handle_confirm_delete, pattern=f"^{CONFIRM_DELETE}:"))
+    application.add_handler(CallbackQueryHandler(handle_pack_add_choice, pattern=f"^{PACK_ADD_PREFIX}"))
+    application.add_handler(
+        CallbackQueryHandler(handle_admin_pack_choice, pattern=f"^({GRANT_PACK_PREFIX}|{REVOKE_PACK_PREFIX})")
+    )
     application.add_handler(CallbackQueryHandler(handle_cancel_callback, pattern=f"^{CANCEL_ADD}$"))
 
     if config.run_mode == "webhook":
