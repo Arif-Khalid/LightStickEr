@@ -50,6 +50,8 @@ START_TEXT = (
     "/cancel - back out of whatever's in progress"
 )
 
+WAIT_MESSAGE = "Please wait a moment..."
+
 CACHE_NOTE = (
     "\n\nTelegram caches sticker packs on your device, so this change might not show up right "
     "away — close the Telegram app completely and reopen it if the pack still looks unchanged."
@@ -104,6 +106,7 @@ async def pack(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     title = " ".join(context.args)
     bot_username = context.bot_data["bot_username"]
+    await update.message.reply_text(WAIT_MESSAGE)
     results = await list_current_sets(context.bot, slugify_title(title), bot_username)
     if not results:
         await update.message.reply_text(f'No pack named "{title}" exists yet.')
@@ -120,6 +123,7 @@ async def pack(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def mypacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     config = context.bot_data["config"]
     user_id = update.effective_user.id
+    await update.message.reply_text(WAIT_MESSAGE)
     packs = await packs_db.list_all() if user_id == config.owner_user_id else await packs_db.list_for_admin(user_id)
     if not packs:
         await update.message.reply_text("You're not an admin of any packs yet.")
@@ -193,6 +197,7 @@ async def _start_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE
     config = context.bot_data["config"]
     user_id = update.effective_user.id
     if user_id != config.owner_user_id:
+        await update.message.reply_text(WAIT_MESSAGE)
         packs = await packs_db.list_for_admin(user_id)
         if not packs:
             await update.message.reply_text("You're not an admin of any packs yet.")
@@ -248,6 +253,7 @@ async def _handle_new_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     config = context.bot_data["config"]
     user_id = update.effective_user.id
+    await update.message.reply_text(WAIT_MESSAGE)
     packs = await packs_db.list_all() if user_id == config.owner_user_id else await packs_db.list_for_admin(user_id)
 
     buttons = [
@@ -302,6 +308,7 @@ async def _handle_delete_target(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text(not_ours_text)
         return
 
+    await update.message.reply_text(WAIT_MESSAGE)
     try:
         sticker_set = await context.bot.get_sticker_set(set_name)
     except TelegramError:
@@ -347,6 +354,7 @@ async def handle_confirm_delete(update: Update, context: ContextTypes.DEFAULT_TY
 
     await query.edit_message_reply_markup(reply_markup=None)
     context.user_data[PENDING_DELETE_KEY] = None
+    await context.bot.send_message(query.message.chat_id, WAIT_MESSAGE)
 
     config = context.bot_data["config"]
     if not await packs_db.is_admin(pending["slug"], query.from_user.id, config.owner_user_id):
@@ -381,6 +389,7 @@ async def handle_title_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     title = title[:MAX_TITLE_LENGTH]
 
     await _remove_prompt_keyboard(context, update.effective_chat.id)
+    await update.message.reply_text(WAIT_MESSAGE)
 
     bot_username = context.bot_data["bot_username"]
     existing = await list_current_sets(context.bot, slugify_title(title), bot_username)
@@ -435,6 +444,7 @@ async def _add_and_reply(
     bot_username = context.bot_data["bot_username"]
     slug = slugify_title(title)
 
+    await context.bot.send_message(chat_id, WAIT_MESSAGE)
     allowed = await packs_db.claim_or_check(slug, title, user_id, config.owner_user_id)
     if not allowed:
         await context.bot.send_message(
@@ -489,6 +499,7 @@ async def _handle_admin_target(update: Update, context: ContextTypes.DEFAULT_TYP
 
     await _remove_prompt_keyboard(context, update.effective_chat.id)
     context.user_data[ADMIN_ACTION_KEY] = None
+    await message.reply_text(WAIT_MESSAGE)
 
     config = context.bot_data["config"]
     acting_user_id = update.effective_user.id
@@ -542,6 +553,7 @@ async def handle_admin_pack_choice(update: Update, context: ContextTypes.DEFAULT
 
     is_grant = query.data.startswith(GRANT_PACK_PREFIX)
     slug = query.data[len(GRANT_PACK_PREFIX if is_grant else REVOKE_PACK_PREFIX):]
+    await context.bot.send_message(query.message.chat_id, WAIT_MESSAGE)
     title = await packs_db.get_title(slug)
 
     await query.edit_message_reply_markup(reply_markup=None)
