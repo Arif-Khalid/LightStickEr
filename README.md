@@ -61,8 +61,13 @@ sticker, since Telegram doesn't expose that.
 ## Usage
 
 - Send the bot any sticker, then reply with the pack title when it asks.
-- A "Cancel" button is attached to the title prompt and the new-pack
-  confirmation prompt; `/cancel` works too if you'd rather type it.
+- `/delete` then send a sticker to remove it from its pack. The sticker must
+  actually be from a pack this bot created (checked via its `set_name`
+  suffix, which Telegram always sets to `_by_<bot_username>`) - otherwise
+  you'll get an error instead of a delete prompt. You'll be asked to confirm,
+  and the pack's title is named in the confirmation.
+- A "Cancel" button is attached to every prompt along the way (adding or
+  deleting); `/cancel` works too if you'd rather type it.
 - `/pack <title>` lists links to an existing pack's set(s).
 - `/start` shows a short intro.
 

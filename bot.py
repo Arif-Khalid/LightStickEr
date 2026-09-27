@@ -23,14 +23,23 @@ logger = logging.getLogger(__name__)
 PENDING_STICKER_KEY = "pending_sticker"
 PENDING_TITLE_KEY = "pending_title"
 PROMPT_MESSAGE_ID_KEY = "prompt_message_id"
+AWAITING_DELETE_KEY = "awaiting_delete"
+PENDING_DELETE_KEY = "pending_delete"
 
 CONFIRM_YES = "confirm_new:yes"
 CONFIRM_NO = "confirm_new:no"
-CANCEL_ADD = "cancel_add"
+CONFIRM_DELETE = "confirm_delete"
+CANCEL_ADD = "cancel_add"  # cancels whatever flow (add or delete) is currently pending
 
 START_TEXT = (
     "Send me any sticker and I'll ask you which pack to add it to (creating it if it's new).\n\n"
-    "Use /pack <title> to get links to an existing pack, or /cancel to back out of adding a sticker."
+    "Use /pack <title> to get links to an existing pack, /delete to remove a sticker from its "
+    "pack, or /cancel to back out of either."
+)
+
+CACHE_NOTE = (
+    "\n\nTelegram caches sticker packs on your device, so this change might not show up right "
+    "away — close the Telegram app completely and reopen it if the pack still looks unchanged."
 )
 
 
@@ -61,20 +70,22 @@ async def pack(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _remove_prompt_keyboard(context, update.effective_chat.id)
     _clear_pending(context)
-    await update.message.reply_text("Cancelled — sticker not added.")
+    await update.message.reply_text("Cancelled.")
 
 
 async def handle_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
     _clear_pending(context)
-    await query.edit_message_text("Cancelled — sticker not added.")
+    await query.edit_message_text("Cancelled.")
 
 
 def _clear_pending(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data[PENDING_STICKER_KEY] = None
     context.user_data[PENDING_TITLE_KEY] = None
     context.user_data[PROMPT_MESSAGE_ID_KEY] = None
+    context.user_data[AWAITING_DELETE_KEY] = False
+    context.user_data[PENDING_DELETE_KEY] = None
 
 
 async def _remove_prompt_keyboard(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
@@ -95,7 +106,22 @@ async def _remove_prompt_keyboard(context: ContextTypes.DEFAULT_TYPE, chat_id: i
         pass  # message may already be edited/gone - nothing to clean up
 
 
+async def delete_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _clear_pending(context)
+    context.user_data[AWAITING_DELETE_KEY] = True
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data=CANCEL_ADD)]])
+    prompt_message = await update.message.reply_text(
+        "Send me the sticker you want to delete from its pack.",
+        reply_markup=keyboard,
+    )
+    context.user_data[PROMPT_MESSAGE_ID_KEY] = prompt_message.message_id
+
+
 async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if context.user_data.get(AWAITING_DELETE_KEY):
+        await _handle_delete_target(update, context)
+        return
+
     context.user_data[PENDING_STICKER_KEY] = update.message.sticker
     context.user_data[PENDING_TITLE_KEY] = None
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data=CANCEL_ADD)]])
@@ -104,6 +130,67 @@ async def handle_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         reply_markup=keyboard,
     )
     context.user_data[PROMPT_MESSAGE_ID_KEY] = prompt_message.message_id
+
+
+async def _handle_delete_target(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data[AWAITING_DELETE_KEY] = False
+    await _remove_prompt_keyboard(context, update.effective_chat.id)
+
+    sticker = update.message.sticker
+    bot_username = context.bot_data["bot_username"]
+    set_name = sticker.set_name
+
+    not_ours_text = "That sticker isn't from a pack created by this bot, so I can't delete it."
+    if not set_name or not set_name.lower().endswith(f"_by_{bot_username.lower()}"):
+        await update.message.reply_text(not_ours_text)
+        return
+
+    try:
+        sticker_set = await context.bot.get_sticker_set(set_name)
+    except TelegramError:
+        await update.message.reply_text(not_ours_text)
+        return
+
+    context.user_data[PENDING_DELETE_KEY] = {
+        "file_id": sticker.file_id,
+        "title": sticker_set.title,
+    }
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Yes, delete it", callback_data=f"{CONFIRM_DELETE}:yes"),
+                InlineKeyboardButton("Cancel", callback_data=CANCEL_ADD),
+            ]
+        ]
+    )
+    await update.message.reply_text(
+        f'Delete this sticker from "{sticker_set.title}"?',
+        reply_markup=keyboard,
+    )
+
+
+async def handle_confirm_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+
+    pending = context.user_data.get(PENDING_DELETE_KEY)
+    if pending is None:
+        await query.edit_message_text("That request expired — send /delete again.")
+        return
+
+    await query.edit_message_reply_markup(reply_markup=None)
+    context.user_data[PENDING_DELETE_KEY] = None
+
+    try:
+        await context.bot.delete_sticker_from_set(sticker=pending["file_id"])
+        await context.bot.send_message(
+            query.message.chat_id, f'Deleted from "{pending["title"]}".{CACHE_NOTE}'
+        )
+    except TelegramError as exc:
+        logger.exception("Failed to delete sticker")
+        await context.bot.send_message(
+            query.message.chat_id, f"Sorry, couldn't delete that sticker: {exc}"
+        )
 
 
 async def handle_title_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -181,7 +268,8 @@ async def _add_and_reply(
             sticker=sticker,
         )
         await context.bot.send_message(
-            chat_id, f'Added to "{title}"! View the pack: https://t.me/addstickers/{set_name}'
+            chat_id,
+            f'Added to "{title}"! View the pack: https://t.me/addstickers/{set_name}{CACHE_NOTE}',
         )
     except ValueError as exc:
         await context.bot.send_message(chat_id, str(exc))
@@ -203,10 +291,12 @@ def main() -> None:
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("pack", pack))
+    application.add_handler(CommandHandler("delete", delete_command))
     application.add_handler(CommandHandler("cancel", cancel_command))
     application.add_handler(MessageHandler(filters.Sticker.ALL, handle_sticker))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_title_reply))
     application.add_handler(CallbackQueryHandler(handle_confirm_new, pattern="^confirm_new:"))
+    application.add_handler(CallbackQueryHandler(handle_confirm_delete, pattern=f"^{CONFIRM_DELETE}:"))
     application.add_handler(CallbackQueryHandler(handle_cancel_callback, pattern=f"^{CANCEL_ADD}$"))
 
     if config.run_mode == "webhook":
