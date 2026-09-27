@@ -29,11 +29,10 @@ async def claim_or_check(slug: str, title: str, user_id: int, owner_id: int) -> 
     """Returns whether `user_id` may add a sticker to this pack.
 
     A pack with no admin record yet is unclaimed - the first person to add to
-    it becomes its sole admin. Once claimed, only its admins (or the bot
-    owner) may add further stickers.
+    it (owner included) becomes its sole admin and registers it, so it then
+    shows up in pack listings/pickers. Once claimed, only its admins (or the
+    bot owner) may add further stickers.
     """
-    if user_id == owner_id:
-        return True
     doc_ref = _db().collection(COLLECTION).document(slug)
     doc = await doc_ref.get()
     if not doc.exists:
@@ -45,6 +44,8 @@ async def claim_or_check(slug: str, title: str, user_id: int, owner_id: int) -> 
                 "created_at": firestore.SERVER_TIMESTAMP,
             }
         )
+        return True
+    if user_id == owner_id:
         return True
     return user_id in (doc.get("admins") or [])
 
