@@ -2,7 +2,6 @@ from google.cloud import firestore
 from google.cloud.firestore import FieldFilter
 
 COLLECTION = "packs"
-BONUS_MESSAGES_COLLECTION = "bonus_messages"
 
 _client: firestore.AsyncClient | None = None
 
@@ -77,16 +76,3 @@ async def list_for_admin(user_id: int) -> list[tuple[str, str]]:
 async def list_all() -> list[tuple[str, str]]:
     """Returns [(slug, title), ...] for every registered pack."""
     return [(doc.id, doc.get("title")) async for doc in _db().collection(COLLECTION).stream()]
-
-
-async def get_bonus_messages(user_id: int) -> list[str]:
-    """Returns the extra "P.S. ..." messages configured for this user, if any.
-
-    Doc id is the user's numeric Telegram id (as a string); the "messages"
-    field holds the list of candidates to pick from at random. Returns an
-    empty list for anyone with no document (i.e. no bonus messages).
-    """
-    doc = await _db().collection(BONUS_MESSAGES_COLLECTION).document(str(user_id)).get()
-    if not doc.exists:
-        return []
-    return list(doc.get("messages") or [])

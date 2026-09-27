@@ -1,5 +1,4 @@
 import logging
-import random
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, MessageOriginUser, Sticker, Update
 from telegram.error import TelegramError
@@ -12,6 +11,7 @@ from telegram.ext import (
     filters,
 )
 
+import bonus_messages
 import packs_db
 import webhook_server
 from config import load_config
@@ -74,13 +74,13 @@ CACHE_NOTE = (
 async def _bonus_message(user_id: int) -> str:
     """A little something extra for whichever users have messages configured.
 
-    Looked up from Firestore (`bonus_messages/{user_id}`, field "messages") -
-    see packs_db.get_bonus_messages. Returns "" for anyone with none set.
+    See bonus_messages.get_message for where it comes from and how repeats
+    are avoided. Returns "" for anyone with none configured.
     """
-    messages = await packs_db.get_bonus_messages(user_id)
-    if not messages:
+    message = await bonus_messages.get_message(user_id)
+    if not message:
         return ""
-    return "\n\n" + random.choice(messages)
+    return "\n\n" + message
 
 
 def _effective_user_id(context: ContextTypes.DEFAULT_TYPE, real_user_id: int) -> int:
