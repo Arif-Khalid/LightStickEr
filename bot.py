@@ -29,6 +29,7 @@ AWAITING_DELETE_KEY = "awaiting_delete"
 PENDING_DELETE_KEY = "pending_delete"
 ADMIN_ACTION_KEY = "admin_action"  # "grant" or "revoke" while awaiting a target user
 PENDING_ADMIN_TARGET_KEY = "pending_admin_target"  # {"user_id", "name"} awaiting a pack choice
+MOCK_USER_ID_KEY = "mock_user_id"  # owner-only: pretend to be this user id, for testing
 
 CONFIRM_YES = "confirm_new:yes"
 CONFIRM_NO = "confirm_new:no"
@@ -50,6 +51,19 @@ START_TEXT = (
     "/cancel - back out of whatever's in progress"
 )
 
+OWNER_TEXT = (
+    "\n\nOwner commands:\n"
+    "/mock <user_id> - act as another user, for testing\n"
+    "/unmock - stop acting as another user"
+)
+
+
+def _start_text_for(real_user_id: int, owner_id: int) -> str:
+    if real_user_id == owner_id:
+        return START_TEXT + OWNER_TEXT
+    return START_TEXT
+
+
 WAIT_MESSAGE = "Please wait a moment..."
 
 CACHE_NOTE = (
@@ -69,8 +83,50 @@ async def _bonus_message(user_id: int) -> str:
     return "\n\n" + random.choice(messages)
 
 
+def _effective_user_id(context: ContextTypes.DEFAULT_TYPE, real_user_id: int) -> int:
+    """Resolves the id to actually act as - the owner's active /mock target, if any.
+
+    Only ever substitutes for the real owner; anyone else's real id passes
+    through unchanged, since only the owner can set a mock in the first place.
+    """
+    config = context.bot_data["config"]
+    if real_user_id == config.owner_user_id:
+        mock_id = context.user_data.get(MOCK_USER_ID_KEY)
+        if mock_id is not None:
+            return mock_id
+    return real_user_id
+
+
+async def mock_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Hidden: silently ignore for anyone but the real owner, so its existence
+    # isn't revealed. Always checked against the real id, never a mocked one.
+    config = context.bot_data["config"]
+    if update.effective_user.id != config.owner_user_id:
+        return
+
+    if not context.args or not context.args[0].lstrip("-").isdigit():
+        await update.message.reply_text("Usage: /mock <user_id>")
+        return
+
+    mock_id = int(context.args[0])
+    _clear_pending(context)
+    context.user_data[MOCK_USER_ID_KEY] = mock_id
+    await update.message.reply_text(f"Now acting as user {mock_id}. Use /unmock to stop.")
+
+
+async def unmock_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    config = context.bot_data["config"]
+    if update.effective_user.id != config.owner_user_id:
+        return  # hidden, same as /mock
+
+    _clear_pending(context)
+    context.user_data[MOCK_USER_ID_KEY] = None
+    await update.message.reply_text("No longer mocking - back to your own identity.")
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(START_TEXT)
+    config = context.bot_data["config"]
+    await update.message.reply_text(_start_text_for(update.effective_user.id, config.owner_user_id))
 
 
 async def whoami(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -102,7 +158,7 @@ async def pack(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def mypacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     config = context.bot_data["config"]
-    user_id = update.effective_user.id
+    user_id = _effective_user_id(context, update.effective_user.id)
     await update.message.reply_text(WAIT_MESSAGE)
     packs = await packs_db.list_all() if user_id == config.owner_user_id else await packs_db.list_for_admin(user_id)
     if not packs:
@@ -175,7 +231,7 @@ async def revoke_admin_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def _start_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE, mode: str) -> None:
     config = context.bot_data["config"]
-    user_id = update.effective_user.id
+    user_id = _effective_user_id(context, update.effective_user.id)
     if user_id != config.owner_user_id:
         await update.message.reply_text(WAIT_MESSAGE)
         packs = await packs_db.list_for_admin(user_id)
@@ -224,7 +280,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     # Nothing pending and nothing recognized - remind them what the bot does.
-    await message.reply_text(START_TEXT)
+    config = context.bot_data["config"]
+    await message.reply_text(_start_text_for(update.effective_user.id, config.owner_user_id))
 
 
 async def _handle_new_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -232,7 +289,7 @@ async def _handle_new_sticker(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.user_data[PENDING_TITLE_KEY] = None
 
     config = context.bot_data["config"]
-    user_id = update.effective_user.id
+    user_id = _effective_user_id(context, update.effective_user.id)
     await update.message.reply_text(WAIT_MESSAGE)
     packs = await packs_db.list_all() if user_id == config.owner_user_id else await packs_db.list_for_admin(user_id)
 
@@ -272,7 +329,9 @@ async def handle_pack_add_choice(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data[PENDING_STICKER_KEY] = None
     context.user_data[PROMPT_MESSAGE_ID_KEY] = None
 
-    await _add_and_reply(context, query.message.chat_id, query.from_user.id, sticker, title)
+    await _add_and_reply(
+        context, query.message.chat_id, _effective_user_id(context, query.from_user.id), sticker, title
+    )
 
 
 async def _handle_delete_target(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -297,7 +356,7 @@ async def _handle_delete_target(update: Update, context: ContextTypes.DEFAULT_TY
 
     config = context.bot_data["config"]
     slug = slugify_title(sticker_set.title)
-    user_id = update.effective_user.id
+    user_id = _effective_user_id(context, update.effective_user.id)
     if not await packs_db.is_admin(slug, user_id, config.owner_user_id):
         await update.message.reply_text(
             f'You don\'t have admin rights on "{sticker_set.title}", so I can\'t delete from it.'
@@ -337,7 +396,8 @@ async def handle_confirm_delete(update: Update, context: ContextTypes.DEFAULT_TY
     await context.bot.send_message(query.message.chat_id, WAIT_MESSAGE)
 
     config = context.bot_data["config"]
-    if not await packs_db.is_admin(pending["slug"], query.from_user.id, config.owner_user_id):
+    user_id = _effective_user_id(context, query.from_user.id)
+    if not await packs_db.is_admin(pending["slug"], user_id, config.owner_user_id):
         await context.bot.send_message(
             query.message.chat_id,
             f'You don\'t have admin rights on "{pending["title"]}" anymore, so I can\'t delete from it.',
@@ -346,7 +406,7 @@ async def handle_confirm_delete(update: Update, context: ContextTypes.DEFAULT_TY
 
     try:
         await context.bot.delete_sticker_from_set(sticker=pending["file_id"])
-        bonus = await _bonus_message(query.from_user.id)
+        bonus = await _bonus_message(user_id)
         await context.bot.send_message(
             query.message.chat_id,
             f'Deleted from "{pending["title"]}".{CACHE_NOTE}{bonus}',
@@ -396,7 +456,12 @@ async def handle_title_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     context.user_data[PENDING_STICKER_KEY] = None
     await _add_and_reply(
-        context, update.effective_chat.id, update.effective_user.id, sticker, title, already_waited=True
+        context,
+        update.effective_chat.id,
+        _effective_user_id(context, update.effective_user.id),
+        sticker,
+        title,
+        already_waited=True,
     )
 
 
@@ -415,7 +480,9 @@ async def handle_confirm_new(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if query.data == CONFIRM_YES:
         context.user_data[PENDING_STICKER_KEY] = None
-        await _add_and_reply(context, query.message.chat_id, query.from_user.id, sticker, title)
+        await _add_and_reply(
+            context, query.message.chat_id, _effective_user_id(context, query.from_user.id), sticker, title
+        )
     else:
         await context.bot.send_message(query.message.chat_id, "Okay, what's the correct title?")
 
@@ -492,7 +559,7 @@ async def _handle_admin_target(update: Update, context: ContextTypes.DEFAULT_TYP
     await message.reply_text(WAIT_MESSAGE)
 
     config = context.bot_data["config"]
-    acting_user_id = update.effective_user.id
+    acting_user_id = _effective_user_id(context, update.effective_user.id)
 
     if mode == "grant":
         packs = (
@@ -584,6 +651,8 @@ def main() -> None:
     application.add_handler(CommandHandler("grantadmin", grant_admin_command))
     application.add_handler(CommandHandler("revokeadmin", revoke_admin_command))
     application.add_handler(CommandHandler("cancel", cancel_command))
+    application.add_handler(CommandHandler("mock", mock_command))
+    application.add_handler(CommandHandler("unmock", unmock_command))
     application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_message))
     application.add_handler(CallbackQueryHandler(handle_confirm_new, pattern="^confirm_new:"))
     application.add_handler(CallbackQueryHandler(handle_confirm_delete, pattern=f"^{CONFIRM_DELETE}:"))
