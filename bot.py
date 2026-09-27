@@ -414,7 +414,9 @@ async def handle_title_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     context.user_data[PENDING_STICKER_KEY] = None
-    await _add_and_reply(context, update.effective_chat.id, update.effective_user.id, sticker, title)
+    await _add_and_reply(
+        context, update.effective_chat.id, update.effective_user.id, sticker, title, already_waited=True
+    )
 
 
 async def handle_confirm_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -438,13 +440,19 @@ async def handle_confirm_new(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def _add_and_reply(
-    context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int, sticker: Sticker, title: str
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    user_id: int,
+    sticker: Sticker,
+    title: str,
+    already_waited: bool = False,
 ) -> None:
     config = context.bot_data["config"]
     bot_username = context.bot_data["bot_username"]
     slug = slugify_title(title)
 
-    await context.bot.send_message(chat_id, WAIT_MESSAGE)
+    if not already_waited:
+        await context.bot.send_message(chat_id, WAIT_MESSAGE)
     allowed = await packs_db.claim_or_check(slug, title, user_id, config.owner_user_id)
     if not allowed:
         await context.bot.send_message(
