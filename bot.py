@@ -1,4 +1,5 @@
 import logging
+import random
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Sticker, Update
 from telegram.error import TelegramError
@@ -41,6 +42,39 @@ CACHE_NOTE = (
     "\n\nTelegram caches sticker packs on your device, so this change might not show up right "
     "away — close the Telegram app completely and reopen it if the pack still looks unchanged."
 )
+
+# A little something extra for one particular user.
+GIRLFRIEND_USER_ID = 372918555
+GIRLFRIEND_BONUS_MESSAGES = [
+    "P.S. Arif likes you <3",
+    "P.S. Your boyfriend thinks you are the best",
+    "P.S. Your outfits are the cutest, your boyfriend told me the other day",
+    "P.S. Arif is thinking about his girlfriend right now",
+    "P.S. Your boyfriend thinks you are so adorable",
+    "P.S. Arif would pick you as his girlfriend all over again, 10/10",
+    "P.S. Your boyfriend is smiling just thinking of you",
+    "P.S. Go crush that gym session, your boyfriend wishes he was as committed",
+    "P.S. Arif thinks his girlfriend's training intensity and commitment is inspiring",
+    "P.S. Your boyfriend thinks you're a lifesaver, in and out of the pool. You saved his life by coming into it.",
+    "P.S. You make Arif's day better by just being around :)",
+    "P.S. Arif wants you to know and I quote: \"Damn you are gorgeous\"",
+    "P.S. Officially certified by Arif: best lifeguard, best girlfriend",
+    "P.S. Arif and his girlfriend really do have great taste, how else could they have found each other",
+    "P.S. Trying new and many food varieties is easy when your boyfriend can finish all the leftovers",
+    "P.S. Arif will trade you all pork for all tomatoes"
+    "P.S. Save some chocolate for your boyfriend",
+    "P.S. Sweet tooth confirmed, telling Arif to send chocolates",
+    "P.S. Rest that knee please, your boyfriend insists",
+    "P.S. Arif's plantar fasciitis says hi to his girlfriend's knee, fellow injured athlete",
+    "P.S. Two injured runners, one great excuse for boyfriend-girlfriend rest days",
+    "P.S. Your voice bubbles are the highlight of your boyfriend's day",
+]
+
+
+def _bonus_message(user_id: int) -> str:
+    if user_id != GIRLFRIEND_USER_ID:
+        return ""
+    return "\n\n" + random.choice(GIRLFRIEND_BONUS_MESSAGES)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -184,7 +218,9 @@ async def handle_confirm_delete(update: Update, context: ContextTypes.DEFAULT_TY
     try:
         await context.bot.delete_sticker_from_set(sticker=pending["file_id"])
         await context.bot.send_message(
-            query.message.chat_id, f'Deleted from "{pending["title"]}".{CACHE_NOTE}'
+            query.message.chat_id,
+            f'Deleted from "{pending["title"]}".'
+            f"{CACHE_NOTE}{_bonus_message(query.from_user.id)}",
         )
     except TelegramError as exc:
         logger.exception("Failed to delete sticker")
@@ -229,7 +265,7 @@ async def handle_title_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     context.user_data[PENDING_STICKER_KEY] = None
-    await _add_and_reply(context, update.effective_chat.id, sticker, title)
+    await _add_and_reply(context, update.effective_chat.id, update.effective_user.id, sticker, title)
 
 
 async def handle_confirm_new(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -247,13 +283,13 @@ async def handle_confirm_new(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if query.data == CONFIRM_YES:
         context.user_data[PENDING_STICKER_KEY] = None
-        await _add_and_reply(context, query.message.chat_id, sticker, title)
+        await _add_and_reply(context, query.message.chat_id, query.from_user.id, sticker, title)
     else:
         await context.bot.send_message(query.message.chat_id, "Okay, what's the correct title?")
 
 
 async def _add_and_reply(
-    context: ContextTypes.DEFAULT_TYPE, chat_id: int, sticker: Sticker, title: str
+    context: ContextTypes.DEFAULT_TYPE, chat_id: int, user_id: int, sticker: Sticker, title: str
 ) -> None:
     config = context.bot_data["config"]
     bot_username = context.bot_data["bot_username"]
@@ -269,7 +305,8 @@ async def _add_and_reply(
         )
         await context.bot.send_message(
             chat_id,
-            f'Added to "{title}"! View the pack: https://t.me/addstickers/{set_name}{CACHE_NOTE}',
+            f'Added to "{title}"! View the pack: https://t.me/addstickers/{set_name}'
+            f"{CACHE_NOTE}{_bonus_message(user_id)}",
         )
     except ValueError as exc:
         await context.bot.send_message(chat_id, str(exc))
