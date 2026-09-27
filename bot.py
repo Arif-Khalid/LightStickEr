@@ -57,36 +57,16 @@ CACHE_NOTE = (
     "away — close the Telegram app completely and reopen it if the pack still looks unchanged."
 )
 
-# A little something extra for one particular user.
-GIRLFRIEND_USER_ID = 372918555
-GIRLFRIEND_BONUS_MESSAGES = [
-    "P.S. Arif likes you <3",
-    "P.S. Your boyfriend thinks you are the best",
-    "P.S. Your outfits are the cutest, according to your boyfriend",
-    "P.S. Arif is thinking about his girlfriend right now",
-    "P.S. Your boyfriend thinks you make sticker-hunting look adorable",
-    "P.S. Arif would pick you as his girlfriend all over again, 10/10",
-    "P.S. Your boyfriend is smiling just thinking of you",
-    "P.S. Go crush that gym session, dear - your boyfriend Arif is cheering you on",
-    "P.S. Arif thinks his girlfriend's training arc is inspiring",
-    "P.S. Your boyfriend thinks you're a lifesaver, in and out of the pool",
-    "P.S. Officially certified by Arif: best lifeguard, best girlfriend",
-    "P.S. Arif thinks his girlfriend saving lives for fun is kind of amazing",
-    "P.S. Arif and his girlfriend really do have great taste - in food, at least",
-    "P.S. Not picky, just efficient eaters, you and your boyfriend",
-    "P.S. Save some chocolate for your boyfriend",
-    "P.S. Sweet tooth confirmed - Arif says send chocolate to his girlfriend",
-    "P.S. Rest that knee, dear - your boyfriend insists",
-    "P.S. Arif's plantar fasciitis says hi to his girlfriend's knee, fellow injured athlete",
-    "P.S. Two injured runners, one great excuse for boyfriend-girlfriend rest days",
-    "P.S. Your voice bubbles are the highlight of your boyfriend Arif's day",
-]
+async def _bonus_message(user_id: int) -> str:
+    """A little something extra for whichever users have messages configured.
 
-
-def _bonus_message(user_id: int) -> str:
-    if user_id != GIRLFRIEND_USER_ID:
+    Looked up from Firestore (`bonus_messages/{user_id}`, field "messages") -
+    see packs_db.get_bonus_messages. Returns "" for anyone with none set.
+    """
+    messages = await packs_db.get_bonus_messages(user_id)
+    if not messages:
         return ""
-    return "\n\n" + random.choice(GIRLFRIEND_BONUS_MESSAGES)
+    return "\n\n" + random.choice(messages)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -366,9 +346,10 @@ async def handle_confirm_delete(update: Update, context: ContextTypes.DEFAULT_TY
 
     try:
         await context.bot.delete_sticker_from_set(sticker=pending["file_id"])
+        bonus = await _bonus_message(query.from_user.id)
         await context.bot.send_message(
             query.message.chat_id,
-            f'Deleted from "{pending["title"]}".{CACHE_NOTE}{_bonus_message(query.from_user.id)}',
+            f'Deleted from "{pending["title"]}".{CACHE_NOTE}{bonus}',
         )
     except TelegramError as exc:
         logger.exception("Failed to delete sticker")
@@ -469,10 +450,11 @@ async def _add_and_reply(
             bot_username=bot_username,
             sticker=sticker,
         )
+        bonus = await _bonus_message(user_id)
         await context.bot.send_message(
             chat_id,
             f'Added to "{title}"! View the pack: https://t.me/addstickers/{set_name}'
-            f"{CACHE_NOTE}{_bonus_message(user_id)}",
+            f"{CACHE_NOTE}{bonus}",
         )
     except ValueError as exc:
         await context.bot.send_message(chat_id, str(exc))
